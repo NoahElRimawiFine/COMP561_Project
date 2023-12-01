@@ -1,6 +1,8 @@
 import os
 import pandas as pd
 from Bio import SeqIO
+import bisect
+import json
 
 TEST_RUNNING = False  # set to true to only sequence part of genome for faster testing
 
@@ -65,60 +67,91 @@ def read_genome(directory):
 
 
 # note that there are 131 TF's in the PWM, but 133 in the real TF binding data
+# this function is quite complex. Here is what it does:
+# it creates a dataset of positive and negative examples. However the dataset is far too large to do this with brute force
+# therefore what we do is that we first split up data by chromosome. This significantly reduces the number of examples we compare.
+# secondly, we sort the positive examples. Then we only look for the positive examples in the potential neg_row that are in that thin band of being possible
+# this speeds up the computation on my computer from 10+ hours to 3 minutes.
 def extract_tf_examples(cell_tfbs_df, real_tf_binding_df, genome_sequences):
-    positive_examples = {}
-    negative_examples = {}
+    positive_examples_by_chromosome = {}
     for tf in real_tf_binding_df["Transcription_Factor"].unique():
-        print(f"extracting data for {tf}")
         positive_df = real_tf_binding_df[
             real_tf_binding_df["Transcription_Factor"] == tf
-        ]
-        positive_examples[tf] = [
-            {
-                "chromosome": row["Chromosome"],
-                "start": row["Start"],
-                "end": row["End"],
-                "sequence": genome_sequences[row["Chromosome"]][
-                    row["Start"] : row["End"]
-                ],
-            }
-            for _, row in positive_df.iterrows()
-        ]
+        ].sort_values(by="Start")
+        for chrom, chrom_df in positive_df.groupby("Chromosome"):
+            positive_examples_by_chromosome.setdefault(chrom, {}).setdefault(
+                tf, []
+            ).extend(chrom_df.to_dict("records"))
 
-        # TODO: I'm uncertain about what counts as a "sequence" in the region.
-        # Is it every possible sequence there?
-        # Or is the whole region the sequence?
-        negative_regions = cell_tfbs_df[
-            ~cell_tfbs_df.apply(
-                lambda row: any(
-                    (positive_df["Chromosome"] == row["Chromosome"])
-                    & (positive_df["Start"] <= row["End"])
-                    & (positive_df["End"] >= row["Start"])
-                ),
-                axis=1,
-            )
-        ]
+    positive_examples = {
+        tf: [] for tf in real_tf_binding_df["Transcription_Factor"].unique()
+    }
+    negative_examples = {
+        tf: [] for tf in real_tf_binding_df["Transcription_Factor"].unique()
+    }
 
-        negative_examples[tf] = [
-            {
-                "chromosome": row["Chromosome"],
-                "start": row["Start"],
-                "end": row["End"],
-                "sequence": genome_sequences[row["Chromosome"]][
-                    row["Start"] : row["End"]
-                ],
-            }
-            for _, row in negative_regions.iterrows()
-        ]
+    for chrom, chrom_df in cell_tfbs_df.groupby("Chromosome"):
+        if chrom in positive_examples_by_chromosome:
+            for tf in negative_examples.keys():
+                positive_tf_examples = positive_examples_by_chromosome[chrom].get(
+                    tf, []
+                )
+                positive_starts = [
+                    ex["Start"] for ex in positive_tf_examples
+                ]  # Extract start positions
+
+                for _, neg_row in chrom_df.iterrows():
+                    start, end = neg_row["Start"], neg_row["End"]
+                    is_negative = True
+
+                    idx = bisect.bisect_left(positive_starts, start)
+                    for pos_example in positive_tf_examples[idx:]:
+                        if pos_example["Start"] > end:
+                            break
+                        if pos_example["End"] <= end:
+                            is_negative = False
+                            break
+
+                    if is_negative:
+                        sequence = genome_sequences[chrom][start:end]
+                        negative_examples[tf].append(
+                            {
+                                "chromosome": chrom,
+                                "start": start,
+                                "end": end,
+                                "sequence": sequence,
+                            }
+                        )
+                for pos_example in positive_tf_examples:
+                    sequence = genome_sequences[chrom][
+                        pos_example["Start"] : pos_example["End"]
+                    ]
+                    positive_examples[tf].append(
+                        {
+                            "chromosome": chrom,
+                            "start": pos_example["Start"],
+                            "end": pos_example["End"],
+                            "sequence": sequence,
+                        }
+                    )
 
     return positive_examples, negative_examples
+
+
+def write_pos_and_neg_to_files(positive_examples, negative_examples):
+    f1 = open(DATA_FOLDER + "positive_examples.json", "w")
+    json.dump(positive_examples, f1)
+    f2 = open(DATA_FOLDER + "negative_examples.json", "w")
+    json.dump(negative_examples, f2)
+
+    return
 
 
 cell_tfbs_df, pwm_dict, real_tf_binding = read_data(
     CELL_TFBS_FILE, PWM_FILE, REAL_TF_BINDING_FILE
 )
 genome = read_genome(GENOME_DIRECTORY)
-
 positive_examples, negative_examples = extract_tf_examples(
     cell_tfbs_df, real_tf_binding, genome
 )
+write_pos_and_neg_to_files(positive_examples, negative_examples)
