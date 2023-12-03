@@ -12,9 +12,10 @@ CELL_TFBS_FILE = DATA_FOLDER + "wgEncodeRegTfbsClusteredV3.GM12878.merged.bed"
 PWM_FILE = DATA_FOLDER + "factorbookMotifPwm.txt"
 REAL_TF_BINDING_FILE = DATA_FOLDER + "factorbookMotifPos.txt"
 GENOME_DIRECTORY = DATA_FOLDER + "chromFa"
+GENOME_SHAPE = DATA_FOLDER + "genome_shape"
 
 
-def read_data(cell_tfbs_file, pwm_file, real_tf_binding_file):
+def read_data(cell_tfbs_file, pwm_file, real_tf_binding_file, genome_shape_file):
     # data for cell GM..
     column_names = ["Chromosome", "Start", "End", "Region_ID"]
     cell_tfbs_df = pd.read_csv(
@@ -47,7 +48,12 @@ def read_data(cell_tfbs_file, pwm_file, real_tf_binding_file):
         usecols=[1, 2, 3, 4, 5, 6],
     )
 
-    return cell_tfbs_df, pwm_dict, real_tf_binding
+    column_names = ["Chromosome", "Start", "End", "mgw"]  # minor groove width (mgw)
+    genome_shape = pd.read_csv(
+        genome_shape_file, sep="\t", header=None, names=column_names
+    )
+
+    return cell_tfbs_df, pwm_dict, real_tf_binding, genome_shape
 
 
 def read_genome(directory):
@@ -147,11 +153,16 @@ def write_pos_and_neg_to_files(positive_examples, negative_examples):
     return
 
 
-cell_tfbs_df, pwm_dict, real_tf_binding = read_data(
-    CELL_TFBS_FILE, PWM_FILE, REAL_TF_BINDING_FILE
+cell_tfbs_df, pwm_dict, real_tf_binding, genome_shape = read_data(
+    CELL_TFBS_FILE, PWM_FILE, REAL_TF_BINDING_FILE, GENOME_SHAPE
 )
+breakpoint()
 genome = read_genome(GENOME_DIRECTORY)
-positive_examples, negative_examples = extract_tf_examples(
-    cell_tfbs_df, real_tf_binding, genome
-)
-write_pos_and_neg_to_files(positive_examples, negative_examples)
+
+# to generate positive and negative files dataset
+# positive_examples, negative_examples = extract_tf_examples(
+#     cell_tfbs_df, real_tf_binding, genome
+# )
+# write_pos_and_neg_to_files(positive_examples, negative_examples)
+
+# if you already have positive and negative files generated
