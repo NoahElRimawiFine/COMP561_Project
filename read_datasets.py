@@ -7,6 +7,10 @@ from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
 
+# TODO:
+# extract negative examples using PWM
+# look at +/- of binding site, use reverse compliment if necessary
+
 TEST_RUNNING = True  # set to true to only sequence part of genome and use 1st chr only.
 
 DATA_FOLDER = "datasets/"
@@ -87,81 +91,6 @@ def read_genome(directory):
                     for record in SeqIO.parse(file, "fasta"):
                         sequences[record.id] = str(record.seq)
     return sequences
-
-
-def extract_tf_examples_old(cell_tfbs_df, real_tf_binding_df, genome_sequences):
-    positive_examples_by_chromosome = {}
-    for tf in real_tf_binding_df["Transcription_Factor"].unique():
-        positive_df = real_tf_binding_df[
-            real_tf_binding_df["Transcription_Factor"] == tf
-        ].sort_values(by="Start")
-        for chrom, chrom_df in positive_df.groupby("Chromosome"):
-            positive_examples_by_chromosome.setdefault(chrom, {}).setdefault(
-                tf, []
-            ).extend(chrom_df.to_dict("records"))
-
-            if TEST_RUNNING:
-                break
-
-    positive_examples = {
-        tf: [] for tf in real_tf_binding_df["Transcription_Factor"].unique()
-    }
-    negative_examples = {
-        tf: [] for tf in real_tf_binding_df["Transcription_Factor"].unique()
-    }
-
-    for chrom, chrom_df in cell_tfbs_df.groupby("Chromosome"):
-        if chrom in positive_examples_by_chromosome:
-            tfs_to_process = negative_examples.keys()
-            if TEST_RUNNING:
-                tfs_to_process = list(tfs_to_process)[:5]  # First 5 TFs in test mode
-            for tf in tfs_to_process:
-                positive_tf_examples = positive_examples_by_chromosome[chrom].get(
-                    tf, []
-                )
-                positive_starts = [
-                    ex["Start"] for ex in positive_tf_examples
-                ]  # Extract start positions
-
-                for _, neg_row in chrom_df.iterrows():
-                    start, end = neg_row["Start"], neg_row["End"]
-                    is_negative = True
-
-                    idx = bisect.bisect_left(positive_starts, start)
-                    for pos_example in positive_tf_examples[idx:]:
-                        if pos_example["Start"] > end:
-                            break
-                        if pos_example["End"] <= end:
-                            is_negative = False
-                            break
-
-                    if is_negative:
-                        sequence = genome_sequences[chrom][start:end]
-                        negative_examples[tf].append(
-                            {
-                                "chromosome": chrom,
-                                "start": start,
-                                "end": end,
-                                "sequence": sequence,
-                            }
-                        )
-                for pos_example in positive_tf_examples:
-                    sequence = genome_sequences[chrom][
-                        pos_example["Start"] : pos_example["End"]
-                    ]
-                    positive_examples[tf].append(
-                        {
-                            "chromosome": chrom,
-                            "start": pos_example["Start"],
-                            "end": pos_example["End"],
-                            "sequence": sequence,
-                        }
-                    )
-
-        if TEST_RUNNING:
-            break
-
-    return positive_examples, negative_examples
 
 
 # note that there are 131 TF's in the PWM, but 133 in the real TF binding data
