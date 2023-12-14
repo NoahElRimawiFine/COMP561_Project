@@ -74,6 +74,11 @@ def reshape_genome_shape_data(genome_shape_df):
     return reshaped_data
 
 
+def reverse_complement(seq):
+    complement = {"A": "T", "C": "G", "G": "C", "T": "A"}
+    return "".join(complement[base] for base in reversed(seq.upper()))
+
+
 def read_genome(directory):
     sequences = {}
     if TEST_RUNNING:  # make testing much faster by only going through one chromosome
@@ -100,8 +105,14 @@ def read_genome(directory):
 # secondly, we sort the positive examples. Then we only look for the positive examples in the potential neg_row that are in that thin band of being possible
 # this speeds up the computation on my computer from 10+ hours to 3 minutes.
 def extract_tf_examples(
-    cell_tfbs_df, real_tf_binding_df, genome_sequences, genome_shape_data
+    cell_tfbs_df,
+    real_tf_binding_df,
+    genome_sequences,
+    genome_shape_data,
+    pwm_dict,
+    threshold,
 ):
+    pwm_max = calculate_max_pwm_scores(pwm_dict)
     positive_examples_by_chromosome = {}
     for tf in real_tf_binding_df["Transcription_Factor"].unique():
         positive_df = real_tf_binding_df[
@@ -156,21 +167,32 @@ def extract_tf_examples(
                         mgw_vector = (
                             genome_shape_data[chrom].loc[start : end - 1].tolist()
                         )
-                        new_row = pd.DataFrame(
-                            [
-                                {
+                        # Check each N-length subsequence
+                        pwm_length = len(next(iter(pwm_dict.values()))[0])
+                        for i in range(len(sequence) - pwm_length + 1):
+                            subseq = sequence[i : i + pwm_length].lower()
+                            pwm_score = calculate_pwm_score(subseq, pwm_dict[tf])
+                            if pwm_score >= threshold * pwm_max[tf]:
+                                new_row = {
                                     "chromosome": chrom,
-                                    "start": start,
-                                    "end": end,
-                                    "sequence": sequence.lower(),
-                                    "mgw_vector": mgw_vector,
+                                    "start": start + i,
+                                    "end": start + i + pwm_length,
+                                    "sequence": subseq,
+                                    "mgw_vector": mgw_vector[i : i + pwm_length],
                                     "label": 0,
                                 }
-                            ]
-                        )
-                        negative_examples[tf] = pd.concat(
-                            [negative_examples[tf], new_row], ignore_index=True
-                        )
+                                # check that 'n' is not in sequence, and that mgw vector is not empty
+                                if (
+                                    "n" not in new_row["sequence"]
+                                    and new_row["mgw_vector"]
+                                ):
+                                    new_row_df = pd.DataFrame([new_row])
+                                    negative_examples[tf] = pd.concat(
+                                        [negative_examples[tf], new_row_df],
+                                        ignore_index=True,
+                                    )
+
+                                    break  # Stop after finding the first high-scoring subsequence. Is this right?
 
                 for _, pos_example in positive_tf_examples.iterrows():
                     sequence = genome_sequences[chrom][
@@ -193,9 +215,14 @@ def extract_tf_examples(
                             }
                         ]
                     )
-                    positive_examples[tf] = pd.concat(
-                        [positive_examples[tf], new_row], ignore_index=True
-                    )
+                    # check that 'n' is not in sequence, and that mgw vector is not empty
+                    if (
+                        "n" not in new_row.at[0, "sequence"]
+                        and new_row.at[0, "mgw_vector"]
+                    ):
+                        positive_examples[tf] = pd.concat(
+                            [positive_examples[tf], new_row], ignore_index=True
+                        )
 
         if TEST_RUNNING:
             break
@@ -259,8 +286,6 @@ def train_models_per_tf(positive_examples, negative_examples, pwm_dict):
             current_time = time.time()
             print(f"Time for AB: {current_time - last_timestamp:.2f} seconds")
             last_timestamp = current_time
-
-            breakpoint()
 
             # pwm model only
             model_pwm_only = LinearRegression()
@@ -328,6 +353,14 @@ def calculate_pwm_score(sequence, pwm_matrix):
     return max_score
 
 
+def calculate_max_pwm_scores(pwm_dict):
+    max_scores = {}
+    for tf, pwm in pwm_dict.items():
+        max_score = sum(max(column) for column in zip(*pwm))
+        max_scores[tf] = max_score
+    return max_scores
+
+
 # read data
 cell_tfbs_df, pwm_dict, real_tf_binding, genome_shape = read_data(
     CELL_TFBS_FILE, PWM_FILE, REAL_TF_BINDING_FILE, GENOME_SHAPE
@@ -336,10 +369,10 @@ genome = read_genome(GENOME_DIRECTORY)
 
 # to generate positive and negative files dataset
 positive_examples, negative_examples = extract_tf_examples(
-    cell_tfbs_df, real_tf_binding, genome, genome_shape
+    cell_tfbs_df, real_tf_binding, genome, genome_shape, pwm_dict, 0.0
 )
 
-# breakpoint()
+breakpoint()
 
 models_pwm_only, models_pwm_shape = train_models_per_tf(
     positive_examples, negative_examples, pwm_dict
