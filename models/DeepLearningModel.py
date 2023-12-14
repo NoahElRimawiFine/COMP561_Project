@@ -22,7 +22,7 @@ def one_hot_encode_seq(sequence, max_length):
     return one_hot_matrix[seq_encoded]
 
 
-# Split the data into training and testing sets
+# Split the data into training and testing sets -- I believe that to_categorical changes the labels to one-hot encoded vectors
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 y_train, y_test = to_categorical(y_train), to_categorical(y_test)  # classification labels
 
