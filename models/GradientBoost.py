@@ -47,6 +47,8 @@ def train_models_per_tf(positive_examples, negative_examples, pwm_dict):
             X_shape = pd.concat([combined_data[["pwm_score"]], mgw_expanded], axis=1)
             y = combined_data["label"]
 
+            # I may need to do one-hot encoding for the labels here
+
             # Train, tune, and select the best PWM-only model
             best_model_pwm_only, best_score_pwm, best_params_pwm = train_and_tune_model(X_pwm, y)
             models_pwm_only[tf] = best_model_pwm_only
