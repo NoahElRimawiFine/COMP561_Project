@@ -3,12 +3,15 @@ import os
 import numpy as np
 import pandas as pd
 from Bio import SeqIO
-from Bio.Seq import reverse_complement
 import bisect
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
-from COMP561_Project.translate import seq_to_shape
+from multiprocessing import Pool, cpu_count
+
+# from COMP561_Project.translate import seq_to_shape
+from translate import seq_to_shape
+
 
 # TODO:
 # extract negative examples using PWM
@@ -22,7 +25,7 @@ CELL_TFBS_FILE = DATA_FOLDER + "wgEncodeRegTfbsClusteredV3.GM12878.merged.bed"
 PWM_FILE = DATA_FOLDER + "factorbookMotifPwm.txt"
 REAL_TF_BINDING_FILE = DATA_FOLDER + "factorbookMotifPos.txt"
 GENOME_DIRECTORY = DATA_FOLDER + "chromFa"
-#GENOME_SHAPE = DATA_FOLDER + "genome_shape"
+# GENOME_SHAPE = DATA_FOLDER + "genome_shape"
 
 
 def read_data(cell_tfbs_file, pwm_file, real_tf_binding_file):
@@ -58,29 +61,13 @@ def read_data(cell_tfbs_file, pwm_file, real_tf_binding_file):
         usecols=[1, 2, 3, 4, 5, 6],
     )
 
-    column_names = ["Chromosome", "Start", "End", "mgw"]  # minor groove width (mgw)
-
     return cell_tfbs_df, pwm_dict, real_tf_binding
-
-
-def reshape_genome_shape_data(genome_shape_df):
-    reshaped_data = {}
-    for chrom in genome_shape_df["Chromosome"].unique():
-        chrom_df = genome_shape_df[genome_shape_df["Chromosome"] == chrom]
-        chrom_df = chrom_df.set_index("Start")["mgw"]
-        reshaped_data[chrom] = chrom_df
-    return reshaped_data
-
-
-def reverse_complement(seq):
-    complement = {"A": "T", "C": "G", "G": "C", "T": "A"}
-    return "".join(complement[base] for base in reversed(seq.upper()))
 
 
 def read_genome(directory):
     sequences = {}
-    if TEST_RUNNING:  # make testing much faster by only going through one chromosome
-        for filename in ["chr1.fa"]:
+    if TEST_RUNNING:  # make testing much faster by only going through 5 chromosomes
+        for filename in ["chr1.fa", "chr2.fa", "chr3.fa", "chr4.fa", "chr5.fa"]:
             if filename.endswith(".fa"):
                 filepath = os.path.join(directory, filename)
                 with open(filepath, "r") as file:
@@ -94,6 +81,186 @@ def read_genome(directory):
                     for record in SeqIO.parse(file, "fasta"):
                         sequences[record.id] = str(record.seq)
     return sequences
+
+
+# multiprocessing version
+def extract_tf_examples_multiprocessing(
+    cell_tfbs_df,
+    real_tf_binding_df,
+    genome_sequences,
+    pwm_dict,
+    threshold,
+    TEST_RUNNING=False,
+):
+    pwm_max = calculate_max_pwm_scores(pwm_dict)
+    positive_examples_by_chromosome = {}
+
+    for tf in real_tf_binding_df["Transcription_Factor"].unique():
+        positive_df = real_tf_binding_df[
+            real_tf_binding_df["Transcription_Factor"] == tf
+        ].sort_values(by="Start")
+        for chrom, chrom_df in positive_df.groupby("Chromosome"):
+            if chrom not in positive_examples_by_chromosome:
+                positive_examples_by_chromosome[chrom] = {}
+            if tf not in positive_examples_by_chromosome[chrom]:
+                positive_examples_by_chromosome[chrom][tf] = pd.DataFrame()
+            positive_examples_by_chromosome[chrom][tf] = pd.concat(
+                [positive_examples_by_chromosome[chrom][tf], chrom_df],
+                ignore_index=True,
+            )
+
+    # Limit the chromosomes to process when TEST_RUNNING is True
+    chromosomes_to_process = cell_tfbs_df["Chromosome"].unique()
+    if TEST_RUNNING:
+        chromosomes_to_process = chromosomes_to_process[:5]
+
+    with Pool(5) as pool:
+        results = pool.starmap(
+            process_chromosome,
+            [
+                (
+                    chrom,
+                    cell_tfbs_df[cell_tfbs_df["Chromosome"] == chrom],
+                    positive_examples_by_chromosome,
+                    genome_sequences,
+                    pwm_dict,
+                    threshold,
+                    TEST_RUNNING,
+                    pwm_max,
+                )
+                for chrom in chromosomes_to_process
+            ],
+        )
+
+    combined_positive_examples = {
+        tf: pd.DataFrame() for tf in real_tf_binding_df["Transcription_Factor"].unique()
+    }
+    combined_negative_examples = {
+        tf: pd.DataFrame() for tf in real_tf_binding_df["Transcription_Factor"].unique()
+    }
+
+    # Combine results from multiprocessing
+    for chrom_result in results:
+        for chrom, (pos_ex, neg_ex) in chrom_result.items():
+            for tf in pos_ex:
+                combined_positive_examples[tf] = pd.concat(
+                    [combined_positive_examples[tf], pos_ex[tf]], ignore_index=True
+                )
+                combined_negative_examples[tf] = pd.concat(
+                    [combined_negative_examples[tf], neg_ex[tf]], ignore_index=True
+                )
+
+    return combined_positive_examples, combined_negative_examples
+
+
+def process_chromosome(
+    chrom,
+    cell_tfbs_df,
+    positive_examples_by_chromosome,
+    genome_sequences,
+    pwm_dict,
+    threshold,
+    TEST_RUNNING,
+    pwm_max,
+):
+    positive_examples = {}
+    negative_examples = {}
+
+    tfs_to_process = positive_examples_by_chromosome[chrom].keys()
+    if TEST_RUNNING:
+        tfs_to_process = list(tfs_to_process)[:5]  # Limit to first 10 TFs in test mode
+
+    for tf in tfs_to_process:
+        print(f"{chrom}: {tf}")
+        positive_tf_examples = positive_examples_by_chromosome[chrom].get(
+            tf, pd.DataFrame()
+        )
+        positive_starts = positive_tf_examples["Start"].tolist()
+
+        pos_examples_list = []
+        neg_examples_list = []
+
+        for _, neg_row in cell_tfbs_df.iterrows():
+            if TEST_RUNNING and (
+                len(neg_examples_list) >= 100 or len(pos_examples_list) >= 100
+            ):
+                break
+
+            start, end = neg_row["Start"], neg_row["End"]
+            is_negative = True
+
+            idx = bisect.bisect_left(positive_starts, start)
+            for _, pos_example in positive_tf_examples.iloc[idx:].iterrows():
+                if pos_example["Start"] > end:
+                    break
+                if pos_example["End"] <= end:
+                    is_negative = False
+                    break
+
+            if is_negative:
+                sequence = genome_sequences[chrom][start:end]
+                shape_data = seq_to_shape(
+                    sequence
+                )  # Assuming seq_to_shape function is defined
+
+                # Select required columns
+                selected_shape_data = shape_data[["MGW", "Roll", "ProT", "HelT"]]
+
+                # Check each N-length subsequence
+                pwm_length = len(next(iter(pwm_dict.values()))[0])
+                for i in range(len(sequence) - pwm_length + 1):
+                    subseq = sequence[i : i + pwm_length].lower()
+                    pwm_score = calculate_pwm_score(
+                        subseq, pwm_dict[tf]
+                    )  # Assuming calculate_pwm_score function is defined
+                    if pwm_score >= threshold * pwm_max[tf]:
+                        subseq_shape_data = selected_shape_data.iloc[i : i + pwm_length]
+                        new_row = {
+                            "chromosome": chrom,
+                            "start": start + i,
+                            "end": start + i + pwm_length,
+                            "sequence": subseq,
+                            "label": 0,
+                        }
+                        for col in subseq_shape_data.columns:
+                            new_row[col] = subseq_shape_data[col].tolist()
+
+                        if "n" not in new_row["sequence"]:
+                            neg_examples_list.append(new_row)
+
+        for _, pos_example in positive_tf_examples.iterrows():
+            if TEST_RUNNING and (
+                len(neg_examples_list) >= 100 or len(pos_examples_list) >= 100
+            ):
+                break
+
+            sequence = genome_sequences[chrom][
+                pos_example["Start"] : pos_example["End"]
+            ]
+            shape_data = seq_to_shape(
+                sequence.upper()
+            )  # Assuming seq_to_shape function is defined
+
+            # Select required columns
+            selected_shape_data = shape_data[["MGW", "Roll", "ProT", "HelT"]]
+
+            new_row = {
+                "chromosome": chrom,
+                "start": pos_example["Start"],
+                "end": pos_example["End"],
+                "sequence": sequence.lower(),
+                "label": 1,
+            }
+            for col in selected_shape_data.columns:
+                new_row[col] = selected_shape_data[col].tolist()
+
+            if "n" not in new_row["sequence"]:
+                pos_examples_list.append(new_row)
+
+        negative_examples[tf] = pd.DataFrame(neg_examples_list)
+        positive_examples[tf] = pd.DataFrame(pos_examples_list)
+
+    return {chrom: (positive_examples, negative_examples)}
 
 
 # note that there are 131 TF's in the PWM, but 133 in the real TF binding data
@@ -140,7 +307,7 @@ def extract_tf_examples(
         if chrom in positive_examples_by_chromosome:
             tfs_to_process = negative_examples.keys()
             if TEST_RUNNING:
-                tfs_to_process = list(tfs_to_process)[:5]  # First 5 TFs in test mode
+                tfs_to_process = list(tfs_to_process)[:20]  # First 20 TFs in test mode
             for tf in tfs_to_process:
                 positive_tf_examples = positive_examples_by_chromosome[chrom].get(
                     tf, pd.DataFrame()
@@ -201,7 +368,7 @@ def extract_tf_examples(
                                     break
 
                 for _, pos_example in positive_tf_examples.iterrows():
-                    if TEST_RUNNING and len(positive_examples[tf]) >= 50:
+                    if TEST_RUNNING and len(positive_examples[tf]) >= 100:
                         break
                     sequence = genome_sequences[chrom][
                         pos_example["Start"] : pos_example["End"]
@@ -372,21 +539,27 @@ def calculate_max_pwm_scores(pwm_dict):
     return max_scores
 
 
-# read data
-# cell_tfbs_df, pwm_dict, real_tf_binding = read_data(
-#     CELL_TFBS_FILE, PWM_FILE, REAL_TF_BINDING_FILE
-# )
-# genome = read_genome(GENOME_DIRECTORY)
+if __name__ == "__main__":
+    # read data
+    cell_tfbs_df, pwm_dict, real_tf_binding = read_data(
+        CELL_TFBS_FILE, PWM_FILE, REAL_TF_BINDING_FILE
+    )
+    genome = read_genome(GENOME_DIRECTORY)
 
-# # to generate positive and negative files dataset
-# positive_examples, negative_examples = extract_tf_examples(
-#     cell_tfbs_df, real_tf_binding, genome, pwm_dict, 0.0
-# )
+    # to generate positive and negative files dataset
+    # positive_examples, negative_examples = extract_tf_examples(
+    #     cell_tfbs_df, real_tf_binding, genome, pwm_dict, 0.9
+    # )
 
-# # breakpoint()
+    # multiprocessing version of generate positive and negative files dataset
+    positive_examples, negative_examples = extract_tf_examples_multiprocessing(
+        cell_tfbs_df, real_tf_binding, genome, pwm_dict, 0.9, TEST_RUNNING
+    )
 
-# models_pwm_only, models_pwm_shape = train_models_per_tf(
-#     positive_examples, negative_examples, pwm_dict
-# )
+    breakpoint()
 
-# breakpoint()
+    models_pwm_only, models_pwm_shape = train_models_per_tf(
+        positive_examples, negative_examples, pwm_dict
+    )
+
+    breakpoint()
