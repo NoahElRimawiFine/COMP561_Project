@@ -30,7 +30,7 @@ y_train, y_test = to_categorical(y_train), to_categorical(y_test)  # classificat
 model = Sequential()
 
 # CNN layer -- make sure the input shape matches the shape of the input data
-model.add(Conv1D(filters=64, kernel_size=3, activation='relu', input_shape=(X_train.shape[1], X_train.shape[2])))
+model.add(Conv1D(filters=64, kernel_size=3, activation='relu', strides=1, input_shape=(X_train.shape[1], X_train.shape[2])))
 model.add(MaxPooling1D(pool_size=2))
 
 # LSTM layer
@@ -47,7 +47,7 @@ model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accur
 # Model summary
 model.summary()
 
-# Train the model -- maybe change epochs and batch_size later
+# Train the model -- maybe change epochs and batch_size lateradam
 model.fit(X_train, y_train, epochs=10, batch_size=64, validation_data=(X_test, y_test))
 
 # Evaluate the model
