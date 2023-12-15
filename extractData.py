@@ -12,7 +12,7 @@ file_path = '../chromFa.tar.gz'
 current_directory = os.getcwd()
 
 with tarfile.open(file_path, 'r:gz') as file:
-    file.extractall(current_directory + '/extracted_data')
+    file.extractall(current_directory + '/datasets')
 
 
 
@@ -21,7 +21,7 @@ file_path = '../factorbookMotifPos.txt.gz'
 with gzip.open(file_path, 'rt') as file:
     content = file.read()
 
-    with open(current_directory + 'extracted_data/factorbookMotifPos.txt', 'w') as new_file:
+    with open(current_directory + '/datasets/factorbookMotifPos.txt', 'w') as new_file:
         new_file.write(content)
 
 
@@ -31,7 +31,7 @@ file_path = '../factorbookMotifPwm.txt.gz'
 with gzip.open(file_path, 'rt') as file:
     content = file.read()
 
-    with open(current_directory + '/extracted_data/factorbookMotifPwm.txt', 'w') as new_file:
+    with open(current_directory + '/datasets/factorbookMotifPwm.txt', 'w') as new_file:
         new_file.write(content)
 
 
@@ -58,7 +58,8 @@ processed_df = pd.concat([c.get() for c in chunk_list], ignore_index=True)
 pool.close()
 pool.join()
 
-output_path = current_directory + '/extracted_data/processed_data.csv'
+# Change the output path to save as .bed file
+output_path = current_directory + '/datasets/wgEncodeRegTfbsClusteredV3.GM12878.merged.bed'
 processed_df.to_csv(output_path, sep='\t', index=False, header=False)
 
 
