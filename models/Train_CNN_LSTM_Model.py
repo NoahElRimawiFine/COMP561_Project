@@ -9,7 +9,9 @@ import os
 import sys
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold, GridSearchCV
 from sklearn.metrics import mean_squared_error, r2_score
 
 parent_dir = os.path.dirname(os.getcwd())
@@ -63,6 +65,7 @@ def build_model(num_kernels, kernel_size, lstm_layers, dropout_rate):
 def train_models_per_tf(positive_examples, negative_examples, pwm_dict):
     models_pwm_only = {}
     models_pwm_shape = {}
+    results = {}
 
     max_seq_length = 0
     for tf in pwm_dict.keys():
@@ -147,24 +150,30 @@ def train_models_per_tf(positive_examples, negative_examples, pwm_dict):
             # Train the PWM + shape model
             model_pwm_shape = CustomDataset(X_train_shape_reshaped, y_train)
             train_loader_shape = DataLoader(model_pwm_shape, batch_size=64, shuffle=True)
-            train_evaluate_model(shape_pwm_model, train_loader_shape, .001, epochs=5)
+            #train_evaluate_model(shape_pwm_model, train_loader_shape, .001, epochs=5)
             test_dataset = CustomDataset(X_test_reshaped, y_test)
             test_loader_shape = DataLoader(test_dataset, batch_size=64, shuffle=False)
 
-            accuracy_pwm, loss_pwm = evaluate_model(pwm_only_model, test_loader_pwm)
-            accuracy_shape, loss_shape = evaluate_model(shape_pwm_model, test_loader_shape)
+            # Evaluate the models
+            accuracy_pwm, loss_pwm = train_evaluate_model_kfold(CNN_LSTM, X_train_pwm, y_train, num_kernels, kernel_width, lstm_layers, seq_len, dropout, 0.001, 5, n_splits=5)
+            accuracy_shape, loss_shape = train_evaluate_model_kfold(CNN_LSTM, X_train_shape_reshaped, y_train, num_kernels, kernel_width, lstm_layers, seq_len, dropout, 0.001, 5, n_splits=5)
+
+            # evaluate the models with the test set
+            # accuracy_pwm, loss_pwm = evaluate_model(pwm_only_model, test_loader_pwm)
+            # accuracy_shape, loss_shape = evaluate_model(shape_pwm_model, test_loader_shape)
+
+            # Save results for each TF
+            results[tf] = {
+                'pwm': {'accuracy': accuracy_pwm, 'loss': loss_pwm},
+                'shape': {'accuracy': accuracy_shape, 'loss': loss_shape}
+            }
+
 
             print(f"TF {tf} - PWM Model: Accuracy = {accuracy_pwm:.2f}%, Loss = {loss_pwm:.4f}")
             print(f"TF {tf} - PWM+Shape Model: Accuracy = {accuracy_shape:.2f}%, Loss = {loss_shape:.4f}")
             print("----------------------------------------------------------------")
 
-    return models_pwm_only, models_pwm_shape
-
-
-# This will be the data that we use to train the model
-# train_dataset = CustomDataset(X_train, y_train)
-# train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-# val_loader = DataLoader(val_dataset, batch_size=64, shuffle=True)
+    return results
 
 def train_evaluate_model(model, train_loader, learning_rate, epochs=5):
     # Criterion (Loss function)
@@ -220,44 +229,108 @@ def evaluate_model(model, test_loader):
     average_loss = running_loss / len(test_loader)
     return accuracy, average_loss
 
-    # # Validation loop
-    # model.eval()  # Set the model to evaluation mode
-    # total = 0
-    # correct = 0
-    # with torch.no_grad():  # No need to track gradients during validation
-    #     for inputs, labels in val_loader:
-    #         outputs = model(inputs)
-    #         _, predicted = torch.max(outputs.data, 1)
-    #         total += labels.size(0)
-    #         correct += (predicted == labels).sum().item()
 
-    # # Calculate accuracy
-    # accuracy = 100 * correct / total
+def train_evaluate_model_kfold(model_class, X, y, num_kernels, kernel_width, lstm_layers, seq_len, dropout, learning_rate, epochs, n_splits=5):
+    # KFold cross-validation setup
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+    fold_results = []
+    y = y.to_numpy()
 
-    # return accuracy
+    for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
+        print(f"Fold {fold + 1}/{n_splits}")
+        
+        # Split data
+        X_train_fold, X_val_fold = X[train_idx], X[val_idx]
+        y_train_fold, y_val_fold = y[train_idx], y[val_idx]
+
+        # Convert to PyTorch datasets
+        train_dataset = CustomDataset(X_train_fold, y_train_fold)
+        val_dataset = CustomDataset(X_val_fold, y_val_fold)
+
+        # DataLoaders
+        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
+
+        # Initialize model for each fold
+        model = model_class(num_kernels, kernel_width, lstm_layers, seq_len, dropout)
+        
+        # Criterion and Optimizer
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+        # Training loop
+        for epoch in range(epochs):
+            model.train()
+            running_loss = 0.0
+            for inputs, labels in train_loader:
+                optimizer.zero_grad()
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
+                running_loss += loss.item()
+
+            # Validation loop
+            model.eval()
+            val_loss = 0.0
+            correct = 0
+            total = 0
+            with torch.no_grad():
+                for inputs, labels in val_loader:
+                    outputs = model(inputs)
+                    loss = criterion(outputs, labels)
+                    val_loss += loss.item()
+                    _, predicted = torch.max(outputs.data, 1)
+                    total += labels.size(0)
+                    correct += (predicted == labels).sum().item()
+
+            accuracy = 100 * correct / total
+            print(f"Epoch {epoch+1}/{epochs}, Training Loss: {running_loss/len(train_loader)}, Validation Loss: {val_loss/len(val_loader)}, Accuracy: {accuracy}%")
+
+        fold_results.append((accuracy, val_loss/len(val_loader)))
+
+    # Calculate average results over all folds
+    avg_accuracy = np.mean([result[0] for result in fold_results])
+    avg_loss = np.mean([result[1] for result in fold_results])
+    print(f"Average Accuracy: {avg_accuracy}%, Average Loss: {avg_loss}")
+    # Save results for each TF
+
+    return avg_accuracy, avg_loss
 
 
-
-### Training and Evaluation ###
-# best_metric = float('inf')
-# best_params = {}
-
-# for params in product(*hyperparameter_grid.values()):
-#     param_dict = dict(zip(hyperparameter_grid.keys(), params))
-
-#     # Build the model with current set of hyperparameters
-#     model = build_model(**param_dict)
-
-#     # Train and evaluate the model
-#     metric = train_evaluate_model(model, train_loader, val_loader, param_dict['learning_rate'])
-#     breakpoint()
-
-#     # Update best params if current model is better
-#     if metric < best_metric:
-#         best_metric = metric
-#         best_params = param_dict
-
-# print("Best Parameters:", best_params)
-
-models_pwm_only, models_pwm_shape = train_models_per_tf(
+results = train_models_per_tf(
     positive_examples, negative_examples, pwm_dict)
+
+def plot_aggregated_results(results):
+    # Lists to hold aggregated data
+    tf_labels = list(results.keys())
+    accuracies_pwm = [data['pwm']['accuracy'] for tf, data in results.items()]
+    accuracies_shape = [data['shape']['accuracy'] for tf, data in results.items()]
+    losses_pwm = [data['pwm']['loss'] for tf, data in results.items()]
+    losses_shape = [data['shape']['loss'] for tf, data in results.items()]
+
+    # Create subplots
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle("Aggregated Results per Transcription Factor")
+
+    # Subplot for Accuracy
+    axes[0].plot(tf_labels, accuracies_pwm, label='PWM Only', marker='o', color='blue')
+    axes[0].plot(tf_labels, accuracies_shape, label='PWM+Shape', marker='o', color='red')
+    axes[0].set_title('Accuracy')
+    axes[0].set_xlabel('Transcription Factor')
+    axes[0].set_ylabel('Accuracy (%)')
+    axes[0].legend()
+
+    # Subplot for Loss
+    axes[1].plot(tf_labels, losses_pwm, label='PWM Only', marker='o', color='blue')
+    axes[1].plot(tf_labels, losses_shape, label='PWM+Shape', marker='o', color='red')
+    axes[1].set_title('Loss')
+    axes[1].set_xlabel('Transcription Factor')
+    axes[1].set_ylabel('Loss')
+    axes[1].legend()
+
+    # Show the plot
+    plt.show()
+
+# Call this function with the results from train_models_per_tf
+plot_aggregated_results(results)
