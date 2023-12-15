@@ -1,11 +1,13 @@
 import time
 import os
+import numpy as np
 import pandas as pd
 from Bio import SeqIO
 import bisect
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
+from translate import seq_to_shape
 
 # TODO:
 # extract negative examples using PWM
@@ -74,6 +76,11 @@ def reshape_genome_shape_data(genome_shape_df):
     return reshaped_data
 
 
+def reverse_complement(seq):
+    complement = {"A": "T", "C": "G", "G": "C", "T": "A"}
+    return "".join(complement[base] for base in reversed(seq.upper()))
+
+
 def read_genome(directory):
     sequences = {}
     if TEST_RUNNING:  # make testing much faster by only going through one chromosome
@@ -100,8 +107,13 @@ def read_genome(directory):
 # secondly, we sort the positive examples. Then we only look for the positive examples in the potential neg_row that are in that thin band of being possible
 # this speeds up the computation on my computer from 10+ hours to 3 minutes.
 def extract_tf_examples(
-    cell_tfbs_df, real_tf_binding_df, genome_sequences, genome_shape_data
+    cell_tfbs_df,
+    real_tf_binding_df,
+    genome_sequences,
+    pwm_dict,
+    threshold,
 ):
+    pwm_max = calculate_max_pwm_scores(pwm_dict)
     positive_examples_by_chromosome = {}
     for tf in real_tf_binding_df["Transcription_Factor"].unique():
         positive_df = real_tf_binding_df[
@@ -140,6 +152,8 @@ def extract_tf_examples(
                 positive_starts = positive_tf_examples["Start"].tolist()
 
                 for _, neg_row in chrom_df.iterrows():
+                    if TEST_RUNNING and len(negative_examples[tf]) >= 50:
+                        break
                     start, end = neg_row["Start"], neg_row["End"]
                     is_negative = True
 
@@ -153,49 +167,72 @@ def extract_tf_examples(
 
                     if is_negative:
                         sequence = genome_sequences[chrom][start:end]
-                        mgw_vector = (
-                            genome_shape_data[chrom].loc[start : end - 1].tolist()
-                        )
-                        new_row = pd.DataFrame(
-                            [
-                                {
+                        shape_data = seq_to_shape(
+                            sequence
+                        )  # Get DNA shape data using seq_to_shape
+
+                        # Select required columns
+                        selected_shape_data = shape_data[
+                            ["MGW", "Roll", "ProT", "HelT"]
+                        ]
+
+                        # Check each N-length subsequence
+                        pwm_length = len(next(iter(pwm_dict.values()))[0])
+                        for i in range(len(sequence) - pwm_length + 1):
+                            subseq = sequence[i : i + pwm_length].lower()
+                            pwm_score = calculate_pwm_score(subseq, pwm_dict[tf])
+                            if pwm_score >= threshold * pwm_max[tf]:
+                                subseq_shape_data = selected_shape_data.iloc[
+                                    i : i + pwm_length
+                                ]
+                                new_row = {
                                     "chromosome": chrom,
-                                    "start": start,
-                                    "end": end,
-                                    "sequence": sequence.lower(),
-                                    "mgw_vector": mgw_vector,
+                                    "start": start + i,
+                                    "end": start + i + pwm_length,
+                                    "sequence": subseq,
                                     "label": 0,
                                 }
-                            ]
-                        )
-                        negative_examples[tf] = pd.concat(
-                            [negative_examples[tf], new_row], ignore_index=True
-                        )
+                                # Include shape data as separate columns with lists
+                                for col in subseq_shape_data.columns:
+                                    new_row[col] = subseq_shape_data[col].tolist()
+
+                                if "n" not in new_row["sequence"]:
+                                    new_row_df = pd.DataFrame([new_row])
+                                    negative_examples[tf] = pd.concat(
+                                        [negative_examples[tf], new_row_df],
+                                        ignore_index=True,
+                                    )
+                                    break
 
                 for _, pos_example in positive_tf_examples.iterrows():
+                    if TEST_RUNNING and len(positive_examples[tf]) >= 50:
+                        break
                     sequence = genome_sequences[chrom][
                         pos_example["Start"] : pos_example["End"]
                     ]
-                    mgw_vector = (
-                        genome_shape_data[chrom]
-                        .loc[pos_example["Start"] : pos_example["End"] - 1]
-                        .tolist()
-                    )
-                    new_row = pd.DataFrame(
-                        [
-                            {
-                                "chromosome": chrom,
-                                "start": pos_example["Start"],
-                                "end": pos_example["End"],
-                                "sequence": sequence.lower(),
-                                "mgw_vector": mgw_vector,
-                                "label": 1,
-                            }
-                        ]
-                    )
-                    positive_examples[tf] = pd.concat(
-                        [positive_examples[tf], new_row], ignore_index=True
-                    )
+                    shape_data = seq_to_shape(
+                        sequence.upper()
+                    )  # Get DNA shape data using seq_to_shape
+
+                    # Select required columns
+                    selected_shape_data = shape_data[["MGW", "Roll", "ProT", "HelT"]]
+
+                    new_row = {
+                        "chromosome": chrom,
+                        "start": pos_example["Start"],
+                        "end": pos_example["End"],
+                        "sequence": sequence.lower(),
+                        "label": 1,
+                    }
+                    # Include shape data as separate columns with lists
+                    for col in selected_shape_data.columns:
+                        new_row[col] = selected_shape_data[col].tolist()
+
+                    if "n" not in new_row["sequence"]:
+                        new_row_df = pd.DataFrame([new_row])
+                        positive_examples[tf] = pd.concat(
+                            [positive_examples[tf], new_row_df], ignore_index=True
+                        )
 
         if TEST_RUNNING:
             break
@@ -203,9 +240,11 @@ def extract_tf_examples(
     return positive_examples, negative_examples
 
 
-# temp padding function
-def pad_mgw_vector(vector, max_length, pad_value=0):
-    return vector + [pad_value] * (max_length - len(vector))
+def pad_shape_vector(vector, max_length, pad_value=0):
+    # Replace NaN values with pad_value and pad the vector to max_length
+    return [val if not pd.isna(val) else pad_value for val in vector] + [pad_value] * (
+        max_length - len(vector)
+    )
 
 
 def train_models_per_tf(positive_examples, negative_examples, pwm_dict):
@@ -229,22 +268,38 @@ def train_models_per_tf(positive_examples, negative_examples, pwm_dict):
             and tf in negative_examples
             and not negative_examples[tf].empty
         ):
-            print("A")
-            last_timestamp = time.time()
             tf_positive = positive_examples[tf]
             tf_negative = negative_examples[tf]
 
             combined_data = pd.concat([tf_positive, tf_negative])
             combined_data = add_pwm_scores_to_data(tf, combined_data, pwm_dict)
-            combined_data["padded_mgw_vector"] = combined_data["mgw_vector"].apply(
-                lambda x: pad_mgw_vector(x, max_seq_length)
-            )
+
+            # Initialize list to collect all expanded shape feature columns
+            expanded_shape_columns = []
+
+            # Pad and expand shape features
+            for feature in ["MGW", "Roll", "ProT", "HelT"]:
+                combined_data[f"padded_{feature}_vector"] = combined_data[
+                    feature
+                ].apply(lambda x: pad_shape_vector(x, max_seq_length))
+                expanded_feature = combined_data[f"padded_{feature}_vector"].apply(
+                    pd.Series
+                )
+                expanded_feature.columns = [
+                    f"{feature}_{i}" for i in expanded_feature.columns
+                ]
+                expanded_shape_columns.extend(
+                    expanded_feature.columns
+                )  # Add expanded columns to the list
+                combined_data = pd.concat([combined_data, expanded_feature], axis=1)
 
             X_pwm = combined_data[["pwm_score"]]  # Features for PWM-only model
 
-            mgw_expanded = combined_data["padded_mgw_vector"].apply(pd.Series)
-            X_shape = pd.concat([combined_data[["pwm_score"]], mgw_expanded], axis=1)
-            X_shape.columns = X_shape.columns.astype(str)
+            # Use the list of expanded shape feature columns for the shape model
+            X_shape = pd.concat(
+                [combined_data[["pwm_score"]], combined_data[expanded_shape_columns]],
+                axis=1,
+            )
 
             y = combined_data["label"]
 
@@ -254,13 +309,6 @@ def train_models_per_tf(positive_examples, negative_examples, pwm_dict):
             X_train_shape, X_test_shape, _, _ = train_test_split(
                 X_shape, y, test_size=0.3, random_state=42
             )
-
-            print("B")
-            current_time = time.time()
-            print(f"Time for AB: {current_time - last_timestamp:.2f} seconds")
-            last_timestamp = current_time
-
-            breakpoint()
 
             # pwm model only
             model_pwm_only = LinearRegression()
@@ -272,17 +320,8 @@ def train_models_per_tf(positive_examples, negative_examples, pwm_dict):
             model_pwm_shape.fit(X_train_shape, y_train)
             models_pwm_shape[tf] = model_pwm_shape
 
-            print("C")
-            current_time = time.time()
-            print(f"Time for BC section: {current_time - last_timestamp:.2f} seconds")
-            last_timestamp = current_time
-
             y_pred_pwm = model_pwm_only.predict(X_test_pwm)
             y_pred_shape = model_pwm_shape.predict(X_test_shape)
-            print("D")
-            current_time = time.time()
-            print(f"Time for CD: {current_time - last_timestamp:.2f} seconds")
-            last_timestamp = current_time
 
             print(
                 f"TF: {tf} - PWM-only model - MSE: {mean_squared_error(y_test, y_pred_pwm)}, R2: {r2_score(y_test, y_pred_pwm)}"
@@ -290,12 +329,13 @@ def train_models_per_tf(positive_examples, negative_examples, pwm_dict):
             print(
                 f"TF: {tf} - PWM + Shape model - MSE: {mean_squared_error(y_test, y_pred_shape)}, R2: {r2_score(y_test, y_pred_shape)}"
             )
+            print("----------------------------------------------------------------")
 
     return models_pwm_only, models_pwm_shape
 
 
 def add_pwm_scores_to_data(tf, data, pwm_dict):
-    data["pwm_score"] = 0
+    data["pwm_score"] = np.zeros(len(data), dtype=float)
     for index, row in data.iterrows():
         sequence = row["sequence"]
         pwm_matrix = pwm_dict[tf]  # look into the pwm data to understand the format
@@ -328,6 +368,14 @@ def calculate_pwm_score(sequence, pwm_matrix):
     return max_score
 
 
+def calculate_max_pwm_scores(pwm_dict):
+    max_scores = {}
+    for tf, pwm in pwm_dict.items():
+        max_score = sum(max(column) for column in zip(*pwm))
+        max_scores[tf] = max_score
+    return max_scores
+
+
 # read data
 cell_tfbs_df, pwm_dict, real_tf_binding, genome_shape = read_data(
     CELL_TFBS_FILE, PWM_FILE, REAL_TF_BINDING_FILE, GENOME_SHAPE
@@ -336,7 +384,7 @@ genome = read_genome(GENOME_DIRECTORY)
 
 # to generate positive and negative files dataset
 positive_examples, negative_examples = extract_tf_examples(
-    cell_tfbs_df, real_tf_binding, genome, genome_shape
+    cell_tfbs_df, real_tf_binding, genome, pwm_dict, 0.0
 )
 
 # breakpoint()
