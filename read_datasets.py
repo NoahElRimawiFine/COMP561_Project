@@ -3,11 +3,12 @@ import os
 import numpy as np
 import pandas as pd
 from Bio import SeqIO
+from Bio.Seq import reverse_complement
 import bisect
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
-from translate import seq_to_shape
+from COMP561_Project.translate import seq_to_shape
 
 # TODO:
 # extract negative examples using PWM
@@ -21,10 +22,10 @@ CELL_TFBS_FILE = DATA_FOLDER + "wgEncodeRegTfbsClusteredV3.GM12878.merged.bed"
 PWM_FILE = DATA_FOLDER + "factorbookMotifPwm.txt"
 REAL_TF_BINDING_FILE = DATA_FOLDER + "factorbookMotifPos.txt"
 GENOME_DIRECTORY = DATA_FOLDER + "chromFa"
-GENOME_SHAPE = DATA_FOLDER + "genome_shape"
+#GENOME_SHAPE = DATA_FOLDER + "genome_shape"
 
 
-def read_data(cell_tfbs_file, pwm_file, real_tf_binding_file, genome_shape_file):
+def read_data(cell_tfbs_file, pwm_file, real_tf_binding_file):
     # data for cell GM..
     column_names = ["Chromosome", "Start", "End", "Region_ID"]
     cell_tfbs_df = pd.read_csv(
@@ -58,13 +59,8 @@ def read_data(cell_tfbs_file, pwm_file, real_tf_binding_file, genome_shape_file)
     )
 
     column_names = ["Chromosome", "Start", "End", "mgw"]  # minor groove width (mgw)
-    genome_shape = pd.read_csv(
-        genome_shape_file, sep="\t", header=None, names=column_names
-    )
 
-    reshaped_genome_shape = reshape_genome_shape_data(genome_shape)
-
-    return cell_tfbs_df, pwm_dict, real_tf_binding, reshaped_genome_shape
+    return cell_tfbs_df, pwm_dict, real_tf_binding
 
 
 def reshape_genome_shape_data(genome_shape_df):
@@ -377,20 +373,20 @@ def calculate_max_pwm_scores(pwm_dict):
 
 
 # read data
-cell_tfbs_df, pwm_dict, real_tf_binding, genome_shape = read_data(
-    CELL_TFBS_FILE, PWM_FILE, REAL_TF_BINDING_FILE, GENOME_SHAPE
-)
-genome = read_genome(GENOME_DIRECTORY)
+# cell_tfbs_df, pwm_dict, real_tf_binding = read_data(
+#     CELL_TFBS_FILE, PWM_FILE, REAL_TF_BINDING_FILE
+# )
+# genome = read_genome(GENOME_DIRECTORY)
 
-# to generate positive and negative files dataset
-positive_examples, negative_examples = extract_tf_examples(
-    cell_tfbs_df, real_tf_binding, genome, pwm_dict, 0.0
-)
+# # to generate positive and negative files dataset
+# positive_examples, negative_examples = extract_tf_examples(
+#     cell_tfbs_df, real_tf_binding, genome, pwm_dict, 0.0
+# )
+
+# # breakpoint()
+
+# models_pwm_only, models_pwm_shape = train_models_per_tf(
+#     positive_examples, negative_examples, pwm_dict
+# )
 
 # breakpoint()
-
-models_pwm_only, models_pwm_shape = train_models_per_tf(
-    positive_examples, negative_examples, pwm_dict
-)
-
-breakpoint()
